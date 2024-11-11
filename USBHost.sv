@@ -22,6 +22,7 @@ module USBHost (
   logic [4:0] finishedCRC5;
   logic [15:0] finishedCRC16;
 
+  // Calls the OUT packet to be sent to ADDR 63 and ENDP 4
   task prelabRequest();
     pktSent = 1;
     currentPkt.pid = PID_OUT;
@@ -30,6 +31,8 @@ module USBHost (
     wait(stopPkt);
   endtask : prelabRequest
 
+  /* Register to choose with field of the packet we are currently looking at and
+  the length of that field */
   always_ff @(posedge clock) begin
     if (~reset_n) begin
       currentField <= '0;
@@ -69,14 +72,6 @@ module USBHost (
     end
   end
 
-  // Bit Encoding Register
-  // always_ff @(posedge clock) begin
-  //   if (~reset_n)
-  //     bitEncodeReg <= 0;
-  //   else if (ldBitEncode)
-  //     bitEncodeReg <= currentBit;
-  // end
-
   // Bit Stuff Register
   always_ff @(posedge clock) begin
     if (~reset_n)
@@ -97,35 +92,34 @@ module USBHost (
       nrziReg <= 1;
   end
 
-  // DP/DM Register
-  always_ff @(posedge clock) begin
-    if (~reset_n)
-      dpdmReg <= 0;
-    else
-      dpdmReg <= nrziReg;
-  end
-
+  /* Takes the packet field and sends a bit stream to the CRC, Bit Stuffer, NZRI
+  and the DP/DM */
   bitStreamEncoding encode(.clock, .reset_n, .pktSent, .readyForStuff, .stopPkt, 
                           .lengthField, .currentField, .finishedCRC5, 
                           .finishedCRC16, .currentPkt, .readyForPkt, .ldSync, 
                           .ldPid, .ldPay, .ldAddr, .ldEndp, .ldCRC5, .ldCRC16, 
                           .startCRC5, .startCRC16, .startPass, .endPkt, .shift, 
                           .lsb, .currentBit);
-    
+
+  // Performs the CRC5 on non DATA0 packets
   CRC5 errorDetect5(.clock, .reset_n, .enable(startCRC5), .currentBit, 
                     .send(shift), .finishedCRC5);
 
+  // Performs the CRC16 on the DATA0 packets
   CRC16 errorDetect16(.clock, .reset_n, .enable(startCRC16), .currentBit, 
                       .send(shift), .finishedCRC16);
 
+  // Takes the bit stream given and inserts a 0 for every 6 conesecutive 1s
   bitStuffing stuff(.clock, .reset_n, .startPass, .currentStuffBit(bitStuffReg), 
                     .endPkt, .finishPkt, .readyForStuff, .startEncode, 
                     .stopPkt);
 
+  // Takes the bit stream and performs NRZI encoding on it
   nrziEncoding nrzi(.clock, .reset_n, .startEncode, .donePkt, 
                     .currentEncodeBit(bitStuffReg), .twiddleWires, .endSeq, 
                     .finishPkt, .ldZero, .ldOne);
 
+  // Sets D+ and D- wires to their correct values based on the bit stream
   dpDMFSM setWires(.clock, .reset_n, .twiddleWires, .endSeq,
                    .currentLevels(nrziReg), .donePkt, .dpWire(wires.DP), 
                    .dmWire(wires.DM));
@@ -157,14 +151,8 @@ module USBHost (
 
 endmodule : USBHost
 
-
-// module protocolHandler
-//   (input logic clock, reset_n, readyForPkt,
-//   output logic pktSent);
-
-
-// endmodule: protocolHandler
-
+/* Mimics the CRC5 hardware in order to calculate the residue for the non DATA0 
+packets */
 module CRC5
   (input logic clock, reset_n, enable, currentBit, send,
   output logic [4:0] finishedCRC5);
@@ -175,8 +163,9 @@ module CRC5
 
   assign lastTwoXor = (firstThreeReg[2] ^ currentBit);
   assign firstThreeXor = (lastTwoReg[1] ^ lastTwoXor);
-  // assign finishedCRC5 = ~({firstThreeReg, lastTwoReg});
 
+  /* Creates a register to hold the final residue value once the CRC5 is done
+  calculating */
   always_ff @(posedge clock) begin
     if (~reset_n)
       finishedCRC5 <= '1;
@@ -187,6 +176,7 @@ module CRC5
       finishedCRC5 <= finishedCRC5 << 1;
   end
 
+  // Creates the last two flip flops in the CRC5 hardware
   always_ff @(posedge clock) begin
     if (~reset_n)
       lastTwoReg <= '1;
@@ -194,6 +184,7 @@ module CRC5
       lastTwoReg <= ((lastTwoReg << 1) | lastTwoXor);
   end
 
+  // Creates the first three flip flops in the CRC5 hardware
   always_ff @(posedge clock) begin
     if (~reset_n)
       firstThreeReg <= '1;
@@ -203,6 +194,8 @@ module CRC5
 
 endmodule: CRC5
 
+/* Mimics the CRC16 hardware in order to calculate the residue for the DATA0 
+packets */
 module CRC16
   (input logic clock, reset_n, enable, currentBit, send,
   output logic [15:0] finishedCRC16);
@@ -215,8 +208,9 @@ module CRC16
   assign firstOneXor = (middleThirteenReg[12] ^ lastTwoXor);
   assign middleThirteenXor = (lastTwoReg[1] ^ lastTwoXor);
   assign lastTwoXor = (firstOneReg ^ currentBit);
-  // assign finishedCRC16 = ~({firstOneReg, middleThirteenReg, lastTwoReg});
 
+  /* Creates a register to hold the final residue value once the CRC16 is done
+  calculating */ 
   always_ff @(posedge clock) begin
     if (~reset_n)
       finishedCRC16 <= '1;
@@ -228,6 +222,7 @@ module CRC16
       finishedCRC16 <= finishedCRC16 << 1;
   end
 
+  // Creates the last two flip flops in the CRC16 hardware
   always_ff @(posedge clock) begin
     if (~reset_n)
       lastTwoReg <= '1;
@@ -235,6 +230,7 @@ module CRC16
       lastTwoReg <= ((lastTwoReg << 1) | lastTwoXor);
   end
 
+  // Creates the middle thirteen flip flops in the CRC16 hardware
   always_ff @(posedge clock) begin
     if (~reset_n)
       middleThirteenReg <= '1;
@@ -242,6 +238,7 @@ module CRC16
       middleThirteenReg <= ((middleThirteenReg << 1) | middleThirteenXor);
   end
 
+  // Creates the first flip flop in the CRC16 hardware
   always_ff @(posedge clock) begin
     if (~reset_n)
       firstOneReg <= '1;
@@ -251,6 +248,9 @@ module CRC16
 
 endmodule: CRC16
 
+/* Takes the packet field given and turns it into the appropiate bit stream for
+the CRCs, Bit Stuffer, NRZI, and DP/DM. Each state in the FSM is made for the
+field given */
 module bitStreamEncoding
   (input logic clock, reset_n, pktSent, readyForStuff, stopPkt,
   input logic [6:0] lengthField, 
@@ -440,6 +440,8 @@ module bitStreamEncoding
 
 endmodule: bitStreamEncoding
 
+/* Takes the bit stream and puts a 0 in it after every 6 consecutive 1s. Skips
+the fields that do not need to be bit stuffed */
 module bitStuffing
   (input logic clock, reset_n, startPass, currentStuffBit, endPkt, finishPkt, 
    output logic readyForStuff, startEncode, stopPkt);
@@ -580,6 +582,7 @@ module bitStuffing
 
 endmodule: bitStuffing
 
+// Takes the given bit stream and encodes it using the NRZI encoding
 module nrziEncoding
   (input logic clock, reset_n, startEncode, donePkt, currentEncodeBit,
   output logic twiddleWires, endSeq, finishPkt, ldZero, ldOne);
@@ -662,6 +665,8 @@ module nrziEncoding
 
 endmodule: nrziEncoding
 
+/* Takes the bit stream given and sets the D+ and D- wires depending on if the
+the bitstream had a K or J in it */
 module dpDMFSM
   (input logic clock, reset_n, twiddleWires, endSeq, currentLevels,
   output logic donePkt, dpWire, dmWire);
