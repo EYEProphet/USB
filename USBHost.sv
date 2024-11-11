@@ -7,6 +7,8 @@ typedef enum logic [1:0]
   {BS_J = 2'b10, BS_K = 2'b01, BS_SE0 = 2'b00, BS_SE1 = 2'b11, BS_NC = 2'bzz}
   bus_state_t;
 
+/* Mimics the USB Host so that we can send different kinds of transactions to
+our devices */
 module USBHost (
   USBWires wires,
   input logic clock, reset_n);
