@@ -86,7 +86,7 @@ module USBTB;
     reset_n = 1'b1;
     reset_n <= 1'b0;
 
-    #1 reset_n <= 1'b1;
+    #5 reset_n <= 1'b1;
   endtask : doReset
 
   initial begin
