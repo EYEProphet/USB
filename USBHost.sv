@@ -265,7 +265,8 @@ module bitStreamEncoding
                shift, lsb, currentBit);
 
   enum logic [3:0] {START, SENDSYNC, SENDPID, SENDEOP, SENDPAY, SENDADDR, 
-                    SENDCRC16, SENDENDP, SENDCRC5} currentState, nextState;
+                    SENDCRC16, SENDENDP, SENDCRC5, LAST} 
+                    currentState, nextState;
 
   // Next State and Output Logic
   always_comb begin
@@ -339,12 +340,7 @@ module bitStreamEncoding
         end
       end
       SENDEOP: begin
-        if (~stopPkt) begin
-          nextState = SENDEOP;
-          endPkt = 1;
-        end
-        else if (stopPkt)
-          nextState = START;
+        nextState = LAST;
       end
       SENDPAY: begin
         if (~readyForStuff)
@@ -429,6 +425,14 @@ module bitStreamEncoding
           currentBit = finishedCRC5[4];
         end
       end
+      LAST: begin
+        if (~stopPkt) begin
+          nextState = LAST;
+          endPkt = 1;
+        end
+        else if (stopPkt)
+          nextState = START;
+      end
     endcase
   end
 
@@ -448,64 +452,33 @@ module bitStuffing
   (input logic clock, reset_n, startPass, currentStuffBit, endPkt, finishPkt, 
    output logic readyForStuff, startEncode, stopPkt);
 
-  enum logic [2:0] {START, PASS, SEEN1, SEEN2, SEEN3, SEEN4, SEEN5, SEEN6} 
+  enum logic [2:0] {SEEN1, SEEN2, SEEN3, SEEN4, SEEN5, SEEN6, SEND0} 
                     currentState, nextState;
 
   // Next State and Output Logic
   always_comb begin
     readyForStuff = 1; startEncode = 0; stopPkt = 0;
     unique case (currentState)
-      START: begin
-        if (startPass) begin
-          nextState = PASS;
-          startEncode = 1;
-        end
-        else if (~startPass) begin
-          nextState = START;
-        end
-      end
-      PASS: begin
+      SEEN1: begin
         if (finishPkt) begin
-          nextState = START;
+          nextState = SEEN1;
           stopPkt = 1;
         end
         else if (endPkt) begin
-          nextState = PASS;
+          nextState = SEEN1;
         end
-        else if (startPass) begin
-          nextState = PASS;
-          startEncode = 1;
-        end
-        else if (~startPass && (currentStuffBit != 1)) begin
-          nextState = PASS;
+        else if (startPass | (~startPass && (currentStuffBit != 1))) begin
+          nextState = SEEN1;
           startEncode = 1;
         end
         else if (~startPass && (currentStuffBit == 1)) begin
-          nextState = SEEN1;
-          startEncode = 1;
-        end
-      end
-      SEEN1: begin
-        if (endPkt) begin
-          nextState = PASS;
-          startEncode = 1;
-        end
-        else if (currentStuffBit != 1) begin
-          nextState = SEEN1;
-          startEncode = 1;
-        end
-        else if (currentStuffBit == 1) begin
           nextState = SEEN2;
           startEncode = 1;
         end
       end
       SEEN2: begin
-        if (endPkt) begin
-          nextState = PASS;
-          startEncode = 1;
-        end
-        else if (currentStuffBit != 1) begin
-          nextState = SEEN2;
+        if ((currentStuffBit != 1) | endPkt) begin
+          nextState = SEEN1;
           startEncode = 1;
         end
         else if (currentStuffBit == 1) begin
@@ -514,12 +487,8 @@ module bitStuffing
         end
       end
       SEEN3: begin
-        if (endPkt) begin
-          nextState = PASS;
-          startEncode = 1;
-        end
-        else if (currentStuffBit != 1) begin
-          nextState = SEEN3;
+        if ((currentStuffBit != 1) | endPkt) begin
+          nextState = SEEN1;
           startEncode = 1;
         end
         else if (currentStuffBit == 1) begin
@@ -528,12 +497,8 @@ module bitStuffing
         end
       end
       SEEN4: begin
-        if (endPkt) begin
-          nextState = PASS;
-          startEncode = 1;
-        end
-        else if (currentStuffBit != 1) begin
-          nextState = SEEN4;
+        if ((currentStuffBit != 1) | endPkt) begin
+          nextState = SEEN1;
           startEncode = 1;
         end
         else if (currentStuffBit == 1) begin
@@ -542,12 +507,8 @@ module bitStuffing
         end
       end
       SEEN5: begin
-        if (endPkt) begin
-          nextState = PASS;
-          startEncode = 1;
-        end
-        else if (currentStuffBit != 1) begin
-          nextState = SEEN5;
+        if ((currentStuffBit != 1) | endPkt) begin
+          nextState = SEEN1;
           startEncode = 1;
         end
         else if (currentStuffBit == 1) begin
@@ -556,19 +517,19 @@ module bitStuffing
         end
       end
       SEEN6: begin
-        if (currentStuffBit == 1) begin
-          nextState = PASS;
-          startEncode = 1;
-          readyForStuff = 0;
-        end
-        else if (endPkt) begin
-          nextState = PASS;
+        if ((currentStuffBit != 1) | endPkt) begin
+          nextState = SEEN1;
           startEncode = 1;
         end
-        else if (currentStuffBit != 1) begin
-          nextState = SEEN6;
+        else if (currentStuffBit == 1) begin
+          nextState = SEND0;
           startEncode = 1;
         end
+      end
+      SEND0: begin
+        nextState = SEEN1;
+        startEncode = 1;
+        readyForStuff = 0;
       end
     endcase
   end
@@ -577,7 +538,7 @@ module bitStuffing
   // State Register
   always_ff @(posedge clock) begin
     if (~reset_n)
-      currentState <= START;
+      currentState <= SEEN1;
     else
       currentState <= nextState;
   end
