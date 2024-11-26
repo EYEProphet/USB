@@ -43,7 +43,7 @@ module USBHost (
   // Read/Write signals
   logic read, write, readyForTransaction, outSent, dataSent, inSent,
         dataReceived, notReceived, dataSent, notSent, sendData, sendIN, sendOUT, 
-        success, finish, getDataIn, sendDataOut;
+        correct, finish, getDataIn, sendDataOut;
 
   // Protocal handler signals
   logic restart, ldIN, ldOUT, ldOUTMem, ldNAK, ldACK, ldMemIn, ldMemOut, 
@@ -76,8 +76,13 @@ module USBHost (
     output logic success);
 
     mem <= mempage;
-    data = 64'h0;
-    success = 1'b0;
+    read <= 1;
+
+    wait(finish);
+    
+    read <= 0;
+    data <= finishedPkt.payload;
+    success <= correct;
 
   endtask : readData
 
@@ -91,15 +96,18 @@ module USBHost (
     
     mem <= mempage;
     dataOut <= data;
+    write <= 1;
 
-    success = 1'b0;
+    wait(finish);
+
+    success <= correct;
 
   endtask : writeData
 
   // Communicates with the OS to perform read/writes in the USB
   readWriteFSM rdWr(.clock, .reset_n, .read, .write, .readyForTransaction, 
                     .outSent, .dataSent, .inSent, .dataReceived, .notReceived, 
-                    .dataSent, .notSent, .sendData, .sendIN, .sendOUT, .success,
+                    .dataSent, .notSent, .sendData, .sendIN, .sendOUT, .correct,
                     .finish, .getDataIn, .sendDataOut);
 
   protocolHandler handler(.clock, .reset_n, .sendOUT, .sendIN, .readyForPkt, 
@@ -110,7 +118,7 @@ module USBHost (
                           .notSent, .incRetryNAK, .incRetryTime, .restart, 
                           .dataSent, .receivePkt, .inSent, .incTimeout, 
                           .notReceived, .dataReceived, .ldIN, .ldOUT, .ldNAK, 
-                          .ldACK, .ldMem, .ldDataOut, .ldOUTMem);
+                          .ldACK, .ldMem, .ldDataOut, .ldOUTMem, .sendDataOut);
 
   // Current packet being sent
   always_ff @(posedge clock) begin
@@ -158,7 +166,7 @@ module USBHost (
     end
     else if (ldMem) begin
       currentPkt.pid <= PID_DATA0;
-      currentPkt.payload <= {mem, '0};
+      currentPkt.payload[63:48] <= mem;
       currentPkt.addr <= '0;
       currentPkt.endp <= '0;
     end
@@ -286,9 +294,9 @@ module USBHost (
     else if (sendEndpBits)
       currentBit = currentField[(`ENDP_BITS - lengthField)];
     else if (sendCRC5)
-      currentBit = currentField[lengthField - 1];
+      currentBit = finishedSendCRC5[lengthField - 1];
     else if (sendCRC16)
-      currentBit = currentField[lengthField - 1];
+      currentBit = finishedSendCRC16[lengthField - 1];
   end
 
   // Bit Stuff Register
@@ -445,8 +453,7 @@ module CRC5
 
   assign lastTwoXor = (firstThreeReg[2] ^ currentBit);
   assign firstThreeXor = (lastTwoReg[1] ^ lastTwoXor);
-  assign finishedCRC5 = ~({((firstThreeReg << 1) | firstThreeXor), 
-                          ((lastTwoReg << 1) | lastTwoXor)});
+  assign finishedCRC5 = ~({firstThreeReg, lastTwoReg});
 
   // Creates the last two flip flops in the CRC5 hardware
   always_ff @(posedge clock) begin
@@ -455,7 +462,7 @@ module CRC5
     else if (stopPkt)
       lastTwoReg <= '1;
     else if (enable)
-      lastTwoReg <= ((lastTwoReg << 1) | lastTwoXor);
+      lastTwoReg <= {lastTwoReg[0], lastTwoXor};
   end
 
   // Creates the first three flip flops in the CRC5 hardware
@@ -465,7 +472,7 @@ module CRC5
     else if (stopPkt)
       firstThreeReg <= '1;
     else if (enable)
-      firstThreeReg <= ((firstThreeReg << 1) | firstThreeXor);
+      firstThreeReg <= {firstThreeReg[1:0], firstThreeXor};
   end
 
 endmodule: CRC5
@@ -484,9 +491,7 @@ module CRC16
   assign firstOneXor = (middleThirteenReg[12] ^ lastTwoXor);
   assign middleThirteenXor = (lastTwoReg[1] ^ lastTwoXor);
   assign lastTwoXor = (firstOneReg ^ currentBit);
-  assign finishedCRC16 = ~({((firstOneReg << 1) | firstOneXor), 
-                         ((middleThirteenReg << 1) | middleThirteenXor), 
-                         ((lastTwoReg << 1) | lastTwoXor)});
+  assign finishedCRC16 = ~({firstOneReg, middleThirteenReg, lastTwoReg});
 
   // Creates the last two flip flops in the CRC16 hardware
   always_ff @(posedge clock) begin
@@ -495,7 +500,7 @@ module CRC16
     else if (stopPkt)
       lastTwoReg <= '1;
     else if (enable)
-      lastTwoReg <= ((lastTwoReg << 1) | lastTwoXor);
+      lastTwoReg <= {lastTwoReg[0], lastTwoXor};
   end
 
   // Creates the middle thirteen flip flops in the CRC16 hardware
@@ -505,7 +510,7 @@ module CRC16
     else if (stopPkt)
       middleThirteenReg <= '1;
     else if (enable)
-      middleThirteenReg <= ((middleThirteenReg << 1) | middleThirteenXor);
+      middleThirteenReg <= {middleThirteenReg[11:0], middleThirteenXor};
   end
 
   // Creates the first flip flop in the CRC16 hardware
@@ -515,7 +520,7 @@ module CRC16
     else if (stopPkt)
       firstOneReg <= '1;
     else if (enable)
-      firstOneReg <= ((firstOneReg << 1) | firstOneXor);
+      firstOneReg <= firstOneXor;
   end
 
 endmodule: CRC16
@@ -548,7 +553,7 @@ module bitStreamEncoding
         if (pktSent) begin
           nextState = SENDSYNC;
           ldSendSync = 1;
-          readyForPkt = 0;
+          readyForPkt = 1;
           startPass = 1;
         end
         else begin
@@ -687,9 +692,10 @@ module bitStreamEncoding
           nextState = LAST;
           endPkt = 1;
         end
-        else if (stopPkt)
+        else if (stopPkt) begin
           nextState = START;
           readyForPkt = 1;
+        end
       end
     endcase
   end
@@ -843,6 +849,7 @@ module nrziEncoding
         if (~startEncode) begin
           nextState = PASS;
           endSeq = 1;
+          twiddleWires = 1;
         end
         else if (currentEncodeBit == 1) begin
           nextState = PREV0;
@@ -859,6 +866,7 @@ module nrziEncoding
         if (~startEncode) begin
           nextState = PASS;
           endSeq = 1;
+          twiddleWires = 1;
         end
         else if (currentEncodeBit == 1) begin
           nextState = PREV1;
@@ -921,8 +929,16 @@ module dpDMFSM
           nextState = START;
       end
       SETWIRES: begin
-        if (endSeq)
+        if (endSeq) begin
           nextState = SETX1;
+          dpWire = 0;
+          dmWire = 0;
+        end
+        // else if (endSeq && (currentLevels == 1)) begin
+        //   nextState = SETX1;
+        //   dpWire = 1;
+        //   dmWire = 0;
+        // end
         else if (~twiddleWires) begin
           nextState = SETWIRES;
           dpWire = 1'bz;
@@ -940,55 +956,65 @@ module dpDMFSM
         end
       end
       SETX1: begin
-        nextState = SETX2;
-        dpWire = 0;
-        dmWire = 0;
-      end
-      SETX2: begin
         nextState = SETJ;
         dpWire = 0;
         dmWire = 0;
       end
+      // SETX2: begin
+      //   nextState = SETJ;
+      //   dpWire = 0;
+      //   dmWire = 0;
+      // end
       SETJ: begin
-        nextState = SETWIRES;
+        nextState = START;
         dpWire = 1;
         dmWire = 0;
         donePkt = 1;
       end 
-      WAITSYNC: begin
+      // WAITSYNC: begin
+      //   if (restart)
+      //     nextState = START;
+      //   else if (readDP == 0 && readDM == 1) begin
+      //     nextState = WAITSYNC;
+      //     incZeroCounter = 1;
+      //     wiresTouched = 1;
+      //   end
+      //   else  if ((readDP == 1 && readDM == 0) && countZeroes != 7) begin
+      //     nextState = WAITSYNC;
+      //     clrZeroCounter = 1;
+      //   end
+      //   else if ((readDP == 1 && readDM == 0) && countZeroes == 7) begin
+      //     nextState = CHECKWIRES;
+      //     clrZeroCounter = 1;
+      //   end
+      //   else begin
+      //     nextState = WAITSYNC;
+      //     clrZeroCounter = 1;
+      //   end
+      // end
+      CHECKWIRES: begin
         if (restart)
           nextState = START;
-        else if (readDP == 0 && readDM == 1) begin
-          nextState = WAITSYNC;
-          incZeroCounter = 1;
-          wiresTouched = 1;
-        end
-        else  if ((readDP == 1 && readDM == 0) && countZeroes != 7) begin
-          nextState = WAITSYNC;
-          clrZeroCounter = 1;
-        end
-        else if ((readDP == 1 && readDM == 0) && countZeroes == 7) begin
-          nextState = CHECKWIRES;
-          clrZeroCounter = 1;
-        end
-        else begin
-          nextState = WAITSYNC;
-          clrZeroCounter = 1;
-        end
-      end
-      CHECKWIRES: begin
-        if (readDP == 1 && readDM == 0) begin
+        else if ((readDP == 1 && readDM == 0) && (countZeroes > 0)) begin
           nextState = CHECKWIRES;
           startDecode = 1;
           ldDpDm1 = 1;
+          wiresTouched = 1;
+        end
+        else if ((readDP == 1 && readDM == 0) && (countZeroes == 0)) begin
+          nextState = CHECKWIRES;
         end
         else if (readDP == 0 && readDM == 1) begin
           nextState = CHECKWIRES;
           startDecode = 1;
           ldDpDm0 = 1;
+          wiresTouched = 1;
+          incZeroCounter = 1;
         end
-        else if (readDP == 0 && readDM == 0)
+        else if (readDP == 0 && readDM == 0) begin
           nextState = SAWX1;
+          clrZeroCounter = 1;
+        end
         else
           nextState = CHECKWIRES;
       end
@@ -999,7 +1025,7 @@ module dpDMFSM
         nextState = SAWJ;
       end
       SAWJ: begin
-        nextState = CHECKWIRES;
+        nextState = START;
         doneReceive = 1;
       end
     endcase
@@ -1234,31 +1260,31 @@ module bitStreamDecoding
     unique case (currentState)
       START: begin 
         if (takeBit) begin
-          nextState = GETPID;
-          ldReceivePid = 1;
+          nextState = GETSYNC;
+          ldReceiveSync = 1;
         end
         else begin
           nextState = START;  
         end
       end
-      // GETSYNC: begin
-      //   if (~takeBit)
-      //     nextState = GETSYNC;
-      //   else if (takeBit && (lengthField != 1)) begin
-      //     nextState = GETSYNC;
-      //     storeSync = 1;
-      //     receiveBit = 1; 
-      //   end
-      //   else if (takeBit && (lengthField == 1)) begin
-      //     nextState = GETPID;
-      //     ldReceivePid = 1;
-      //     storeSync = 1;
-      //   end
-      // end
+      GETSYNC: begin
+        if (~takeBit)
+          nextState = GETSYNC;
+        else if (takeBit && (lengthField != 1)) begin
+          nextState = GETSYNC;
+          storeSync = 1;
+          receiveBit = 1; 
+        end
+        else if (takeBit && (lengthField == 1)) begin
+          nextState = GETPID;
+          ldReceivePid = 1;
+          storeSync = 1;
+        end
+      end
       GETPID: begin
         if (~takeBit)
           nextState = GETPID;
-        else if (takeBit && (lengthField != 4)) begin
+        else if (takeBit && (lengthField > 4)) begin
           nextState = GETPID;
           storePid = 1;
           receiveBit = 1;
@@ -1281,6 +1307,10 @@ module bitStreamDecoding
           nextState = GETADDR;
           ldReceiveAddr = 1;
           //storePid = 1;
+        end
+        else begin
+          nextState = GETPID;
+          receiveBit = 1;
         end
       end
       GETEOP: begin
@@ -1403,7 +1433,7 @@ endmodule: bitStreamDecoding
 module readWriteFSM
   (input logic clock, reset_n, read, write, readyForTransaction, outSent, 
                dataSent, inSent, dataReceived, notReceived, notSent,
-  output logic sendData, sendIN, sendOUT, success, finish, getDataIn, 
+  output logic sendData, sendIN, sendOUT, correct, finish, getDataIn, 
                sendDataOut);
 
   enum logic [2:0] {READY, OUTMEM, SENDMEM, INDATA, OUTDATA, GETDATA, 
@@ -1411,7 +1441,7 @@ module readWriteFSM
 
   // Next state and output logic
   always_comb begin
-    sendData = 0; sendIN = 0; sendOUT = 0; success = 0; finish = 0;
+    sendData = 0; sendIN = 0; sendOUT = 0; correct = 0; finish = 0;
     getDataIn = 0; sendDataOut = 0;
     unique case(currentState)
       READY: begin
@@ -1427,13 +1457,14 @@ module readWriteFSM
           nextState = SENDMEM;
           sendData = 1;
         end
-        else
+        else begin
           nextState = OUTMEM;
+        end
       end
       SENDMEM: begin
         if (notSent) begin
           nextState = READY;
-          success = 0;
+          correct = 0;
           finish = 1;
         end
         if (dataSent & read) begin
@@ -1444,52 +1475,62 @@ module readWriteFSM
           nextState = OUTDATA;
           sendOUT = 1;
         end
-        else
+        else begin
           nextState = SENDMEM;
+          sendData = 1;
+        end
       end
       INDATA: begin
         if (inSent) begin
           nextState = GETDATA;
           getDataIn = 1;
         end
-        else
+        else begin
           nextState = INDATA;
+          sendIN = 1;
+        end
       end
       OUTDATA: begin
         if (outSent) begin
           nextState = SENDDATA;
           sendDataOut = 1;
         end
-        else
+        else begin
           nextState = OUTDATA;
+          sendOUT = 1;
+        end
       end
       GETDATA: begin
         if (notReceived) begin
           nextState = READY;
-          success = 0;
+          correct = 0;
           finish = 1;
         end
         else if (dataReceived) begin
           nextState = READY;
-          success = 1;
+          correct = 1;
           finish = 1;
         end
-        else
+        else begin
           nextState = GETDATA;
+          getDataIn = 1;
+        end
       end
       SENDDATA: begin
         if (notSent) begin
           nextState = READY;
-          success = 0;
+          correct = 0;
           finish = 1;
         end
         else if (dataSent) begin
           nextState = READY;
-          success = 1;
+          correct = 1;
           finish = 1;
         end
-        else
+        else begin
           nextState = SENDDATA;
+          sendDataOut = 1;
+        end
       end
     endcase
   end
@@ -1506,7 +1547,7 @@ endmodule: readWriteFSM
 
 module protocolHandler
   (input logic clock, reset_n, sendOUT, sendIN, readyForPkt, donePkt, sendData, 
-               wiresTouched, doneReceive, incorrectCRC, 
+               wiresTouched, doneReceive, incorrectCRC, sendDataOut,
    input logic [3:0] retryTime, retryNAK,
    input logic [7:0] timeoutCount,
    input logic [15:0] mem,
@@ -1535,10 +1576,12 @@ module protocolHandler
           pktSent = 1;
           ldOUTMem = 1;
           sendPkt = 1;
+          readyForTransaction = 1;
         end
         else begin
           nextState = START;
           readyForTransaction = 1;
+          //pktSent = 1;
         end
       end
       WAITOUT: begin
@@ -1554,7 +1597,7 @@ module protocolHandler
           nextState = START;
           notSent = 1;
         end
-        else if (readyForPkt && sendOUT) begin
+        else if (readyForPkt && sendData) begin
           nextState = WAITMEM;
           pktSent = 1;
           ldMem = 1;
@@ -1587,11 +1630,14 @@ module protocolHandler
           nextState = INOROUT;
           dataSent = 1;
         end
-        else if (wiresTouched)
+        else if (wiresTouched) begin
           nextState = CHECKMEM;
+          receivePkt = 1;
+        end
         else begin
           nextState = CHECKMEM;
           incTimeout = 1;
+          receivePkt = 1;
         end
       end
       INOROUT: begin
@@ -1689,7 +1735,7 @@ module protocolHandler
           nextState = START;
           notSent = 1;
         end
-        else if (readyForPkt && sendData) begin
+        else if (readyForPkt && sendDataOut) begin
           nextState = WAITDOUT;
           pktSent = 1;
           ldDataOut = 1;
