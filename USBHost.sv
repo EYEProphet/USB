@@ -13,11 +13,12 @@ module USBHost (
   USBWires wires,
   input logic clock, reset_n);
 
+  // Signals to hold incoming and outgoing packets
   pkt_t currentPkt, finishedPkt;
 
   // Sender side signals
   logic ldSendSync, ldSendPid, ldSendPay, ldSendAddr, ldSendEndp, bitStuffReg, 
-        nrziEnReg, currentBit, ldBitEncode, pktSent, readyForStuff, stopPkt, 
+        nrziEnReg, currentBit, pktSent, readyForStuff, stopPkt, 
         readyForPkt, ldSendCRC5, ldSendCRC16, startCRC5, startCRC16, startPass, 
         endPkt, sendBit, finishPkt, startEncode, twiddleWires, ldZero, 
         ldOne;
@@ -27,7 +28,7 @@ module USBHost (
         ldReceiveCRC5, ldReceiveCRC16, takeBit, receiveCRC5, 
         receiveCRC16, storeSync, storePid, storePay, storeAddr, storeEndp, 
         receiveBit, startSkip, currentDecodeBit, ldDecodedZero, ldDecodedOne, 
-        currentUnstuffBit, doneSkip, bitUnStuffReg, dpDmReg, nrziDeReg, 
+        currentUnstuffBit, bitUnStuffReg, dpDmReg, nrziDeReg, 
         sendSyncBits, sendPidBits, sendPayBits, sendAddrBits, sendEndpBits, 
         sendCRC5, sendCRC16, incUnstuffCounter, clrUnstuffCounter, incorrectCRC;
   logic [4:0] unstuffCounter;
@@ -46,13 +47,14 @@ module USBHost (
         correct, finish, getDataIn, sendDataOut;
 
   // Protocal handler signals
-  logic restart, ldIN, ldOUT, ldOUTMem, ldNAK, ldACK, ldMemIn, ldMemOut, 
+  logic restart, ldIN, ldOUT, ldOUTMem, ldNAK, ldACK, 
         ldDataOut, ldMem, incRetryNAK, incRetryTime, incTimeout;
   logic [3:0] retryTime, retryNAK;
-  logic [7:0] timeoutCount;
+  logic [8:0] timeoutCount;
   logic [15:0] mem;
   logic [63:0] dataOut;
 
+  // Signals to hold parts of packets and their lengths
   logic [63:0] currentField;
   logic [6:0] lengthField;
   logic [4:0] finishedSendCRC5, finishedReceiveCRC5;
@@ -115,6 +117,8 @@ module USBHost (
                     .dataSent, .notSent, .sendData, .sendIN, .sendOUT, .correct,
                     .finish, .getDataIn, .sendDataOut);
 
+  /* Control all the transactions and error checks everything coming in and going
+  out of the system */
   protocolHandler handler(.clock, .reset_n, .sendOUT, .sendIN, .readyForPkt, 
                           .donePkt, .sendData, .wiresTouched, .doneReceive, 
                           .incorrectCRC, .retryTime, .retryNAK, .timeoutCount,
@@ -125,7 +129,7 @@ module USBHost (
                           .notReceived, .dataReceived, .ldIN, .ldOUT, .ldNAK, 
                           .ldACK, .ldMem, .ldDataOut, .ldOUTMem, .sendDataOut);
 
-  // Current packet being sent
+  // Puts together the current packet being sent out
   always_ff @(posedge clock) begin
     if (~reset_n) begin
       currentPkt.pid <= '0;
@@ -222,11 +226,12 @@ module USBHost (
 
   // Performs the CRC5 on non DATA0 packets
   CRC5 sendErrorDetect5(.clock, .reset_n, .enable(startCRC5), .currentBit, 
-                        .finishedCRC5(finishedSendCRC5), .stopPkt);
+                        .finishedCRC5(finishedSendCRC5), .stopPkt, .invert(1));
 
   // Performs the CRC16 on the DATA0 packets
   CRC16 sendErrorDetect16(.clock, .reset_n, .enable(startCRC16), .currentBit, 
-                          .finishedCRC16(finishedSendCRC16), .stopPkt);
+                          .finishedCRC16(finishedSendCRC16), .stopPkt, 
+                          .invert(1));
 
   // Takes the bit stream given and inserts a 0 for every 6 conesecutive 1s
   bitStuffing stuff(.clock, .reset_n, .startPass, 
@@ -286,7 +291,7 @@ module USBHost (
       lengthField <= lengthField - 1;
   end
 
-  // Current bit for CRCs
+  // Gets the current bit to put in the CRC
   always_comb begin
     if (sendSyncBits)
       currentBit = currentField[lengthField - 1];
@@ -343,13 +348,13 @@ module USBHost (
   CRC5 receiveErrorDetect5(.clock, .reset_n, .enable(receiveCRC5), 
                            .currentBit(bitUnStuffReg),
                            .finishedCRC5(finishedReceiveCRC5), 
-                           .stopPkt(receivePkt));
+                           .stopPkt(receivePkt), .invert(0));
 
   // Performs the CRC16 on the DATA0 packets
   CRC16 receiveErrorDetect16(.clock, .reset_n, .enable(receiveCRC16), 
                              .currentBit(bitUnStuffReg), 
                              .finishedCRC16(finishedReceiveCRC16), 
-                             .stopPkt(receivePkt));
+                             .stopPkt(receivePkt), .invert(0));
   
   // Takes the bit stream and performs NRZI decoding on it
   nrziDecoding nrziDe(.clock, .reset_n, .startDecode, .doneReceive, 
@@ -434,7 +439,7 @@ module USBHost (
       dpDmReg <= 1;
   end
 
-  // Counts zeroes to check when SYNC is received on dp/dm wires
+  // Helps differentiate between when the line is a z or a 1;
   always_ff @(posedge clock) begin
     if (~reset_n)
       countZeroes <= '0;
@@ -446,10 +451,11 @@ module USBHost (
 
 endmodule : USBHost
 
+
 /* Mimics the CRC5 hardware in order to calculate the residue for the non DATA0 
 packets */
 module CRC5
-  (input logic clock, reset_n, enable, currentBit, stopPkt,
+  (input logic clock, reset_n, enable, currentBit, stopPkt, invert,
   output logic [4:0] finishedCRC5);
 
   logic [2:0] firstThreeReg;
@@ -458,7 +464,8 @@ module CRC5
 
   assign lastTwoXor = (firstThreeReg[2] ^ currentBit);
   assign firstThreeXor = (lastTwoReg[1] ^ lastTwoXor);
-  assign finishedCRC5 = ~({firstThreeReg, lastTwoReg});
+  assign finishedCRC5 = (invert) ? ~({firstThreeReg, lastTwoReg}) : 
+                                     ({firstThreeReg, lastTwoReg});
 
   // Creates the last two flip flops in the CRC5 hardware
   always_ff @(posedge clock) begin
@@ -482,10 +489,11 @@ module CRC5
 
 endmodule: CRC5
 
+
 /* Mimics the CRC16 hardware in order to calculate the residue for the DATA0 
 packets */
 module CRC16
-  (input logic clock, reset_n, enable, currentBit, stopPkt,
+  (input logic clock, reset_n, enable, currentBit, stopPkt, invert,
   output logic [15:0] finishedCRC16);
 
   logic firstOneReg;
@@ -496,7 +504,9 @@ module CRC16
   assign firstOneXor = (middleThirteenReg[12] ^ lastTwoXor);
   assign middleThirteenXor = (lastTwoReg[1] ^ lastTwoXor);
   assign lastTwoXor = (firstOneReg ^ currentBit);
-  assign finishedCRC16 = ~({firstOneReg, middleThirteenReg, lastTwoReg});
+  assign finishedCRC16 = (invert) ?
+                                ~({firstOneReg, middleThirteenReg, lastTwoReg})
+                                : {firstOneReg, middleThirteenReg, lastTwoReg};
 
   // Creates the last two flip flops in the CRC16 hardware
   always_ff @(posedge clock) begin
@@ -529,6 +539,7 @@ module CRC16
   end
 
 endmodule: CRC16
+
 
 /* Takes the packet field given and turns it into the appropiate bit stream for
 the CRCs, Bit Stuffer, NRZI, and DP/DM. Each state in the FSM is made for the
@@ -715,6 +726,7 @@ module bitStreamEncoding
 
 endmodule: bitStreamEncoding
 
+
 /* Takes the bit stream and puts a 0 in it after every 6 consecutive 1s. Skips
 the fields that do not need to be bit stuffed */
 module bitStuffing
@@ -853,6 +865,7 @@ module bitStuffing
 
 endmodule: bitStuffing
 
+
 // Takes the given bit stream and encodes it using the NRZI encoding
 module nrziEncoding
   (input logic clock, reset_n, startEncode, donePkt, currentEncodeBit,
@@ -939,6 +952,7 @@ module nrziEncoding
 
 endmodule: nrziEncoding
 
+
 /* Takes the bit stream given and sets the D+ and D- wires depending on if the
 the bitstream had a K or J in it */
 module dpDMFSM
@@ -948,7 +962,7 @@ module dpDMFSM
   output logic donePkt, startDecode, doneReceive, dpWire, dmWire, ldDpDm0, 
                ldDpDm1, incZeroCounter, clrZeroCounter, wiresTouched);
 
-  enum logic [4:0] {SETWIRES, SETX1, SETX2, SETJ, START, CHECKWIRES, SAWX1, 
+  enum logic [4:0] {START, SETWIRES, SETX1, SETJ, CHECKWIRES, SAWX1, 
                     SAWX2, SAWJ, WAITSYNC} currentState, nextState;
 
   // Next State and Output Logic
@@ -971,11 +985,6 @@ module dpDMFSM
           dpWire = 0;
           dmWire = 0;
         end
-        // else if (endSeq && (currentLevels == 1)) begin
-        //   nextState = SETX1;
-        //   dpWire = 1;
-        //   dmWire = 0;
-        // end
         else if (~twiddleWires) begin
           nextState = SETWIRES;
           dpWire = 1'bz;
@@ -997,38 +1006,12 @@ module dpDMFSM
         dpWire = 0;
         dmWire = 0;
       end
-      // SETX2: begin
-      //   nextState = SETJ;
-      //   dpWire = 0;
-      //   dmWire = 0;
-      // end
       SETJ: begin
         nextState = START;
         dpWire = 1;
         dmWire = 0;
         donePkt = 1;
       end 
-      // WAITSYNC: begin
-      //   if (restart)
-      //     nextState = START;
-      //   else if (readDP == 0 && readDM == 1) begin
-      //     nextState = WAITSYNC;
-      //     incZeroCounter = 1;
-      //     wiresTouched = 1;
-      //   end
-      //   else  if ((readDP == 1 && readDM == 0) && countZeroes != 7) begin
-      //     nextState = WAITSYNC;
-      //     clrZeroCounter = 1;
-      //   end
-      //   else if ((readDP == 1 && readDM == 0) && countZeroes == 7) begin
-      //     nextState = CHECKWIRES;
-      //     clrZeroCounter = 1;
-      //   end
-      //   else begin
-      //     nextState = WAITSYNC;
-      //     clrZeroCounter = 1;
-      //   end
-      // end
       CHECKWIRES: begin
         if (restart)
           nextState = START;
@@ -1082,6 +1065,7 @@ module dpDMFSM
       currentState <= nextState;
   end
 endmodule: dpDMFSM
+
 
 // Takes the given bit stream and decodes it using the NRZI decoding
 module nrziDecoding
@@ -1272,7 +1256,6 @@ module bitUnstuffing
     endcase
   end
 
-
   // State Register
   always_ff @(posedge clock) begin
     if (~reset_n)
@@ -1306,7 +1289,7 @@ module bitStreamDecoding
     ldReceiveSync = 0; ldReceivePid = 0; ldReceivePay = 0; ldReceiveAddr = 0; 
     ldReceiveEndp = 0; ldReceiveCRC5 = 0; ldReceiveCRC16 = 0; receiveCRC5 = 0; 
     receiveCRC16 = 0; storeSync = 0; storePid = 0; storePay = 0; storeAddr = 0; 
-    storeEndp = 0; receiveBit = 0; incorrectCRC = 0;
+    storeEndp = 0; receiveBit = 0;
     unique case (currentState)
       START: begin 
         if (takeBit) begin
@@ -1361,7 +1344,30 @@ module bitStreamDecoding
         end
       end
       GETEOP: begin
-        nextState = START;
+        if ((finishedPkt.pid == PID_DATA0) && 
+            (finishedReceiveCRC16 == `CRC16_RESIDUE)) begin
+          nextState = START;
+          incorrectCRC = 0;
+        end
+        else if ((finishedPkt.pid == PID_DATA0) && 
+            (finishedReceiveCRC16 != `CRC16_RESIDUE)) begin
+          nextState = START;
+          incorrectCRC = 1;
+        end
+        else if (((finishedPkt.pid == PID_OUT) || (finishedPkt.pid == PID_IN)) 
+                && (finishedReceiveCRC5 == `CRC5_RESIDUE)) begin
+          nextState = START;
+          incorrectCRC = 0;
+        end
+        else if (((finishedPkt.pid == PID_OUT) || (finishedPkt.pid == PID_IN)) 
+                && (finishedReceiveCRC5 != `CRC5_RESIDUE)) begin
+          nextState = START;
+          incorrectCRC = 1;
+        end
+        else begin
+          nextState = START;
+          incorrectCRC = 0;
+        end
       end
       GETPAY: begin
         if (~takeBit)
@@ -1405,21 +1411,8 @@ module bitStreamDecoding
           receiveBit = 1;
         end
         else if (takeBit && (lengthField == 1)) begin
-          nextState = GETCRC16;
+          nextState = GETEOP;
           receiveCRC16 = 1;
-          receiveBit = 1;
-        end
-        else if (takeBit && (lengthField == 0) && 
-                (finishedReceiveCRC16 == `CRC16_RESIDUE)) 
-        begin
-          nextState = GETEOP;
-          incorrectCRC = 0;
-        end
-        else if (takeBit && (lengthField == 0) && 
-                (finishedReceiveCRC16 != `CRC16_RESIDUE)) 
-        begin
-          nextState = GETEOP;
-          incorrectCRC = 1;
         end
       end
       GETENDP: begin
@@ -1449,19 +1442,6 @@ module bitStreamDecoding
         else if (takeBit && (lengthField == 1)) begin
           nextState = GETEOP;
           receiveCRC5 = 1;
-          receiveBit = 1;
-        end
-        else if (takeBit && (lengthField == 0) && 
-                (finishedReceiveCRC5 == `CRC5_RESIDUE)) 
-        begin
-          nextState = GETEOP;
-          incorrectCRC = 0;
-        end
-        else if (takeBit && (lengthField == 0) && 
-                (finishedReceiveCRC5 != `CRC5_RESIDUE)) 
-        begin
-          nextState = GETEOP;
-          incorrectCRC = 1;
         end
       end
     endcase
@@ -1477,6 +1457,9 @@ module bitStreamDecoding
 
 endmodule: bitStreamDecoding
 
+
+/* Interacts the OS to perform read/write and tells the protocol handler whether
+we need to read or not */
 module readWriteFSM
   (input logic clock, reset_n, read, write, readyForTransaction, outSent, 
                dataSent, inSent, dataReceived, notReceived, notSent,
@@ -1514,7 +1497,7 @@ module readWriteFSM
           correct = 0;
           finish = 1;
         end
-        if (dataSent & read) begin
+        else if (dataSent & read) begin
           nextState = INDATA;
           sendIN = 1;
         end
@@ -1592,11 +1575,15 @@ module readWriteFSM
 
 endmodule: readWriteFSM
 
+
+/* Checks produces the IN/OUT transactions and checks to make sure that all
+packets received are not corrupted. If the device ever times out or sends 7 NAKs
+then the transaction is canceled */
 module protocolHandler
   (input logic clock, reset_n, sendOUT, sendIN, readyForPkt, donePkt, sendData, 
                wiresTouched, doneReceive, incorrectCRC, sendDataOut,
    input logic [3:0] retryTime, retryNAK,
-   input logic [7:0] timeoutCount,
+   input logic [8:0] timeoutCount,
    input logic [15:0] mem,
    input logic [63:0] dataOut,
    input pkt_t decodedPkt,
@@ -1676,6 +1663,7 @@ module protocolHandler
         else if (doneReceive && decodedPkt.pid == PID_ACK) begin
           nextState = INOROUT;
           dataSent = 1;
+          restart = 1;
         end
         else if (wiresTouched) begin
           nextState = CHECKMEM;
