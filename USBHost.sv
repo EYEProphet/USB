@@ -102,6 +102,7 @@ module USBHost (
 
     wait(finish);
 
+    write <= 0;
     success <= correct;
     @(posedge clock);
     @(posedge clock);
@@ -1031,7 +1032,7 @@ module dpDMFSM
       CHECKWIRES: begin
         if (restart)
           nextState = START;
-        else if ((readDP == 1 && readDM == 0) && (countZeroes > 0)) begin
+        else if ((readDP == 1 && readDM == 0) && (countZeroes == 1)) begin
           nextState = CHECKWIRES;
           startDecode = 1;
           ldDpDm1 = 1;
@@ -1040,12 +1041,18 @@ module dpDMFSM
         else if ((readDP == 1 && readDM == 0) && (countZeroes == 0)) begin
           nextState = CHECKWIRES;
         end
-        else if (readDP == 0 && readDM == 1) begin
+        else if ((readDP == 0 && readDM == 1) && (countZeroes == 0)) begin
           nextState = CHECKWIRES;
           startDecode = 1;
           ldDpDm0 = 1;
           wiresTouched = 1;
           incZeroCounter = 1;
+        end
+        else if ((readDP == 0 && readDM == 1) && (countZeroes == 1)) begin
+          nextState = CHECKWIRES;
+          startDecode = 1;
+          ldDpDm0 = 1;
+          wiresTouched = 1;
         end
         else if (readDP == 0 && readDM == 0) begin
           nextState = SAWX1;
@@ -1255,9 +1262,10 @@ module bitUnstuffing
       HOLD: begin
         if (doneReceive) begin
           nextState = START;
+          takeBit = 0;
         end
         else begin
-          nextState = START;
+          nextState = SEEN1;
           takeBit = 0;
         end
       end
