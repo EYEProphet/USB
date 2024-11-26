@@ -30,7 +30,7 @@ module USBHost (
         currentUnstuffBit, doneSkip, bitUnStuffReg, dpDmReg, nrziDeReg, 
         sendSyncBits, sendPidBits, sendPayBits, sendAddrBits, sendEndpBits, 
         sendCRC5, sendCRC16, incUnstuffCounter, clrUnstuffCounter, incorrectCRC;
-  logic [3:0] unstuffCounter;
+  logic [4:0] unstuffCounter;
 
   // Dp/Dm signals
   logic endSeq, readDP, readDM, donePkt, sendPkt, receivePkt, startDecode, 
@@ -83,6 +83,8 @@ module USBHost (
     read <= 0;
     data <= finishedPkt.payload;
     success <= correct;
+    @(posedge clock);
+    @(posedge clock);
 
   endtask : readData
 
@@ -101,6 +103,8 @@ module USBHost (
     wait(finish);
 
     success <= correct;
+    @(posedge clock);
+    @(posedge clock);
 
   endtask : writeData
 
@@ -353,7 +357,7 @@ module USBHost (
 
   // Takes the bit stream given and removes a 0 for every 6 conesecutive 1s
   bitUnstuffing unstuff(.clock, .reset_n, .startSkip, 
-                        .currentUnstuffBit(nrziDeReg), .skipPid(unstuffCounter),
+                        .currentUnstuffBit(nrziDeReg), .skipBits(unstuffCounter),
                         .doneReceive, .takeBit, .incUnstuffCounter, 
                         .clrUnstuffCounter);
 
@@ -717,8 +721,8 @@ module bitStuffing
                startStuffing, 
    output logic readyForStuff, startEncode, stopPkt);
 
-  enum logic [2:0] {START, SEEN1, SEEN2, SEEN3, SEEN4, SEEN5, SEEN6, SEND0} 
-                    currentState, nextState;
+  enum logic [3:0] {START, STOP, SEEN1, SEEN2, SEEN3, SEEN4, SEEN5, SEEN6, 
+                    SEND0} currentState, nextState;
 
   // Next State and Output Logic
   always_comb begin
@@ -731,12 +735,9 @@ module bitStuffing
           nextState = START;
       end
       SEEN1: begin
-        if (finishPkt) begin
-          nextState = START;
-          stopPkt = 1;
-        end
-        else if (endPkt) begin
-          nextState = SEEN1;
+        if (endPkt) begin
+          nextState = STOP;
+          startEncode = 1;
         end
         else if (startPass | (~startPass && (currentStuffBit != 1))) begin
           nextState = SEEN1;
@@ -748,7 +749,11 @@ module bitStuffing
         end
       end
       SEEN2: begin
-        if ((currentStuffBit != 1) | endPkt) begin
+        if (endPkt) begin
+          nextState = STOP;
+          startEncode = 1;
+        end
+        else if ((currentStuffBit != 1)) begin
           nextState = SEEN1;
           startEncode = 1;
         end
@@ -758,7 +763,11 @@ module bitStuffing
         end
       end
       SEEN3: begin
-        if ((currentStuffBit != 1) | endPkt) begin
+        if (endPkt) begin
+          nextState = STOP;
+          startEncode = 1;
+        end
+        else if ((currentStuffBit != 1)) begin
           nextState = SEEN1;
           startEncode = 1;
         end
@@ -768,7 +777,11 @@ module bitStuffing
         end
       end
       SEEN4: begin
-        if ((currentStuffBit != 1) | endPkt) begin
+        if (endPkt) begin
+          nextState = STOP;
+          startEncode = 1;
+        end
+        else if ((currentStuffBit != 1)) begin
           nextState = SEEN1;
           startEncode = 1;
         end
@@ -778,7 +791,11 @@ module bitStuffing
         end
       end
       SEEN5: begin
-        if ((currentStuffBit != 1) | endPkt) begin
+        if (endPkt) begin
+          nextState = STOP;
+          startEncode = 1;
+        end
+        else if ((currentStuffBit != 1)) begin
           nextState = SEEN1;
           startEncode = 1;
         end
@@ -788,7 +805,11 @@ module bitStuffing
         end
       end
       SEEN6: begin
-        if ((currentStuffBit != 1) | endPkt) begin
+        if (endPkt) begin
+          nextState = STOP;
+          startEncode = 1;
+        end
+        else if ((currentStuffBit != 1)) begin
           nextState = SEEN1;
           startEncode = 1;
         end
@@ -798,9 +819,24 @@ module bitStuffing
         end
       end
       SEND0: begin
-        nextState = SEEN1;
-        startEncode = 1;
-        readyForStuff = 0;
+        if (endPkt) begin
+          nextState = STOP;
+          startEncode = 1;
+          readyForStuff = 0;
+        end
+        else begin
+          nextState = SEEN1;
+          startEncode = 1;
+          readyForStuff = 0;
+        end
+      end
+      STOP: begin
+        if (finishPkt) begin
+          nextState = START;
+          stopPkt = 1;
+        end
+        else 
+          nextState = STOP;
       end
     endcase
   end
@@ -1114,11 +1150,12 @@ endmodule: nrziDecoding
 /* Takes the bit stream and ignores the 0 after every 6 consecutive 1s. Skips
 the fields that do not need to be bit unstuffed */
 module bitUnstuffing
-  (input logic clock, reset_n, startSkip, currentUnstuffBit, skipPid, 
+  (input logic clock, reset_n, startSkip, currentUnstuffBit, 
                doneReceive, 
+   input logic [4:0] skipBits,
    output logic takeBit, incUnstuffCounter, clrUnstuffCounter);
 
-  enum logic [2:0] {START, SEEN1, SEEN2, SEEN3, SEEN4, SEEN5, SEEN6, HOLD} 
+  enum logic [3:0] {START, PASS, SEEN1, SEEN2, SEEN3, SEEN4, SEEN5, SEEN6, HOLD} 
                     currentState, nextState;
 
   // Next State and Output Logic
@@ -1127,7 +1164,7 @@ module bitUnstuffing
     unique case (currentState)
       START: begin
         if (startSkip) begin
-          nextState = SEEN1;
+          nextState = PASS;
           takeBit = 0;
         end
         else if (~startSkip) begin
@@ -1135,24 +1172,29 @@ module bitUnstuffing
           takeBit = 0;
         end
       end
+      PASS: begin
+        if (skipBits == 16) begin
+          nextState = SEEN1;
+          clrUnstuffCounter = 1;
+          takeBit = 1;
+        end
+        else begin
+          nextState = PASS;
+          incUnstuffCounter = 1;
+          takeBit = 1;
+        end
+      end
       SEEN1: begin
         if (doneReceive) begin
           nextState = START;
-          clrUnstuffCounter = 1;
         end
-        else if (skipPid != 8) begin
-          nextState = SEEN1;
-          takeBit = 1;
-          incUnstuffCounter = 1;
-        end
-        else if (((skipPid == 8) && (currentUnstuffBit != 1))) begin
+        else if ((currentUnstuffBit != 1)) begin
           nextState = SEEN1;
           takeBit = 1;
         end
-        else if (((skipPid == 8) && (currentUnstuffBit == 1))) begin
+        else if ((currentUnstuffBit == 1)) begin
           nextState = SEEN2;
           takeBit = 1;
-          clrUnstuffCounter = 1;
         end
       end
       SEEN2: begin
@@ -1256,7 +1298,7 @@ module bitStreamDecoding
     ldReceiveSync = 0; ldReceivePid = 0; ldReceivePay = 0; ldReceiveAddr = 0; 
     ldReceiveEndp = 0; ldReceiveCRC5 = 0; ldReceiveCRC16 = 0; receiveCRC5 = 0; 
     receiveCRC16 = 0; storeSync = 0; storePid = 0; storePay = 0; storeAddr = 0; 
-    storeEndp = 0; receiveBit = 0;
+    storeEndp = 0; receiveBit = 0; incorrectCRC = 0;
     unique case (currentState)
       START: begin 
         if (takeBit) begin
@@ -1293,20 +1335,17 @@ module bitStreamDecoding
                 ((finishedPkt.pid == PID_ACK) || (finishedPkt.pid == PID_NAK)))
         begin
           nextState = GETEOP;
-          //storePid = 1;
         end
         else if (takeBit && (lengthField == 1) && 
                 (finishedPkt.pid == PID_DATA0)) begin
           nextState = GETPAY;
           ldReceivePay = 1;
-          //storePid = 1;
         end
         else if (takeBit && (lengthField == 1) && 
                 ((finishedPkt.pid == PID_OUT) || (finishedPkt.pid == PID_IN)))
         begin
           nextState = GETADDR;
           ldReceiveAddr = 1;
-          //storePid = 1;
         end
         else begin
           nextState = GETPID;
@@ -1352,7 +1391,7 @@ module bitStreamDecoding
       GETCRC16: begin
         if (~takeBit)
           nextState = GETCRC16;
-        else if (takeBit && (lengthField != 1)) begin
+        else if (takeBit && (lengthField > 1)) begin
           nextState = GETCRC16;
           receiveCRC16 = 1;
           receiveBit = 1;
@@ -1689,6 +1728,7 @@ module protocolHandler
         else begin
           nextState = LOOKDIN;
           incTimeout = 1;
+          receivePkt = 1;
         end
       end
       SENDNAK: begin
@@ -1773,6 +1813,7 @@ module protocolHandler
         else begin
           nextState = CHECKDOUT;
           incTimeout = 1;
+          receivePkt = 1;
         end
       end
     endcase
